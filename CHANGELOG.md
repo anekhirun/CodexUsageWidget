@@ -2,6 +2,17 @@
 
 All notable changes to ChatGPT Codex Usage Widget are documented here.
 
+## 2.1.3 (proposed)
+
+- Ignores separate model quota pools such as Codex Spark when reading the main weekly quota, preventing false 100% remaining readings.
+- Keeps the 2.1.2 overview and adds an optional compact layout with a responsive context slider and full-width blue fill.
+- Preserves intentional custom-catalog context edits even when an older backup differs.
+- Bounds usage-tail reads, skips malformed/incomplete records, and selects the newest valid event inside the configured limits.
+- Saves position by display device and relative offset; recovers visible bounds after display/taskbar changes without parenting WPF to Explorer.
+- Gives the widget sole ownership of positioning and provides an opt-in lifecycle-only Codex watchdog.
+- Allows Codex preset changes while optional CCR is offline; shows synchronization errors and never rewrites settings on startup.
+- Adds isolated configuration, usage, geometry, and WPF tests, a Windows CI workflow, locked dependencies, and commit/hash build provenance.
+
 ## 2.1.2 — 2026-08-26
 
 - Moves context-mode selection from the taskbar slider to the right-click menu.

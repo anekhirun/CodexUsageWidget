@@ -1,6 +1,6 @@
-ChatGPT Codex Usage Widget 2.1.2
-Build date: 2026-08-26
+ChatGPT Codex Usage Widget 2.1.3 (proposed)
 
-Primary label: Weekly and 5-hour quota; context menu
 Runtime: C# / .NET 8 / WPF
+Build SDK: pinned in global.json
 Package: Self-contained Windows x64 EXE
+Source commit, SDK version and SHA-256: build-provenance.json in the generated package

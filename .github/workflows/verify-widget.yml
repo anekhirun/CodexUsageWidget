@@ -1,0 +1,43 @@
+name: Verify Windows widget
+on:
+  push:
+    branches: [main, 'fix/stable-widget-position-and-context']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-dotnet@a98b56852c35b8e3190ac28c8c2271da59106c68 # v6.0.0
+        with:
+          global-json-file: global.json
+      - name: Restore locked dependencies
+        run: dotnet restore tests/CodexUsageWidget.Tests/CodexUsageWidget.Tests.csproj --locked-mode
+      - name: Configuration, placement, bounded reads, and WPF layout tests
+        shell: pwsh
+        run: |
+          $env:CODEX_WIDGET_RENDER_OUTPUT = Join-Path $PWD 'artifacts/qa'
+          dotnet test tests/CodexUsageWidget.Tests/CodexUsageWidget.Tests.csproj -c Release --no-restore --logger trx --results-directory artifacts/test-results
+      - name: Validate Windows PowerShell 5.1 watchdog
+        shell: powershell
+        run: .\scripts\Test-Watchdog.ps1
+      - name: Build package with commit and hash provenance
+        shell: pwsh
+        run: .\scripts\Build-Release.ps1
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: widget-windows-${{ github.sha }}
+          path: |
+            artifacts/test-results/
+            artifacts/qa/
+            artifacts/release/*.zip
+            artifacts/release/*.sha256
+            artifacts/release/**/build-provenance.json
+          if-no-files-found: error

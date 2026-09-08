@@ -7,11 +7,11 @@ internal static class NativeMethods
 {
     private delegate bool EnumWindowsCallback(nint window, nint parameter);
 
-    internal const int GwlStyle = -16;
-    internal const long WsChild = 0x40000000L;
-    internal const long WsPopup = 0x80000000L;
-    internal const uint SwpNoZOrder = 0x0004;
+    internal static readonly nint HwndTopmost = new(-1);
     internal const uint SwpNoActivate = 0x0010;
+    internal const uint SwpNoSize = 0x0001;
+    internal const uint SwpNoMove = 0x0002;
+    internal const uint SwpShowWindow = 0x0040;
 
     [StructLayout(LayoutKind.Sequential)]
     internal struct Rect
@@ -45,7 +45,8 @@ internal static class NativeMethods
             return true;
         }, 0);
 
-        return bestWindow != 0 ? bestWindow : FindWindow("Shell_TrayWnd", null);
+        // A different monitor's primary taskbar must never supply our Y coordinate.
+        return bestWindow;
     }
 
     [DllImport("user32.dll", SetLastError = true)]
@@ -65,18 +66,6 @@ internal static class NativeMethods
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     private static extern int GetClassName(nint window, StringBuilder className, int maxCount);
-
-    [DllImport("user32.dll", SetLastError = true)]
-    internal static extern nint SetParent(nint child, nint newParent);
-
-    [DllImport("user32.dll")]
-    internal static extern nint GetParent(nint window);
-
-    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
-    internal static extern nint GetWindowLongPtr(nint window, int index);
-
-    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW", SetLastError = true)]
-    internal static extern nint SetWindowLongPtr(nint window, int index, nint value);
 
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

@@ -5,6 +5,7 @@
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
     <IsTestProject>true</IsTestProject>
+    <UseWPF>true</UseWPF>
   </PropertyGroup>
 
   <ItemGroup>
@@ -17,6 +18,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Using Include="System.IO" />
+    <Using Include="System.Net.Http" />
     <ProjectReference Include="..\..\src\CodexUsageWidget\CodexUsageWidget.csproj" />
+    <None Include="..\..\src\CodexUsageWidget\MainWindow.xaml" Link="WidgetLayout.xaml" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="..\..\CodexWidget.ico" Link="CodexWidget.ico" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

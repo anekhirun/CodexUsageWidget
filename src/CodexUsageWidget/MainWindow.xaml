@@ -1,13 +1,28 @@
 <Window x:Class="CodexUsageWidget.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:CodexUsageWidget"
         Title="ChatGPT Codex Usage Widget"
         Width="385" Height="48"
         WindowStyle="None" AllowsTransparency="True" Background="Transparent"
         ResizeMode="NoResize" ShowInTaskbar="False" Topmost="False"
         Focusable="False" ShowActivated="False" Icon="CodexWidget.ico">
-    <Border x:Name="Root" Padding="7,2" Cursor="SizeWE" CornerRadius="7" BorderThickness="1"
-            Background="Transparent" BorderBrush="#28FFFFFF">
+    <Window.Resources>
+        <local:SliderProgressConverter x:Key="SliderProgressWidth" />
+    </Window.Resources>
+    <Border x:Name="Root" Padding="7,2" Cursor="SizeWE" CornerRadius="7" BorderThickness="1">
+        <Border.Style>
+            <Style TargetType="Border">
+                <Setter Property="Background" Value="#E81B1B1B" />
+                <Setter Property="BorderBrush" Value="#88414141" />
+                <Style.Triggers>
+                    <Trigger Property="IsMouseOver" Value="True">
+                        <Setter Property="Background" Value="#F3252525" />
+                        <Setter Property="BorderBrush" Value="#CC5B5B5B" />
+                    </Trigger>
+                </Style.Triggers>
+            </Style>
+        </Border.Style>
         <Border.ContextMenu>
             <ContextMenu>
                 <MenuItem x:Name="MoveLeftMenu" Header="Move to left edge" />
@@ -28,12 +43,14 @@
                     <MenuItem x:Name="Context600KMenu" Header="600K" IsCheckable="True" />
                     <MenuItem x:Name="Context1MMenu" Header="1M" IsCheckable="True" />
                 </MenuItem>
+                <MenuItem x:Name="CompactLayoutMenu" Header="Compact layout (context slider)" IsCheckable="True" />
                 <MenuItem x:Name="LockPositionMenu" Header="Lock position" IsCheckable="True" />
                 <Separator />
                 <MenuItem x:Name="ExitMenu" Header="Exit ChatGPT Codex widget" />
             </ContextMenu>
         </Border.ContextMenu>
         <Grid>
+        <Grid x:Name="OverviewLayoutPanel">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="38" />
                 <ColumnDefinition Width="152" />
@@ -46,15 +63,15 @@
             </Grid>
             <Grid Grid.Column="1" Margin="1,0,6,0" VerticalAlignment="Center">
                 <Grid.RowDefinitions><RowDefinition Height="20" /><RowDefinition Height="20" /></Grid.RowDefinitions>
-                <TextBlock x:Name="TimeText" Grid.Row="0" Text="WEEKLY · Reset unavailable" Foreground="#FFF0F0F0"
+                <TextBlock x:Name="OverviewTimeText" Grid.Row="0" Text="WEEKLY · Reset unavailable" Foreground="#FFF0F0F0"
                            FontFamily="Segoe UI Variable Text, Segoe UI" FontWeight="SemiBold" FontSize="10.5"
                            VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
                 <Grid Grid.Row="1">
                     <Grid.ColumnDefinitions><ColumnDefinition Width="112" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
                     <Border Grid.Column="0" Width="112" Height="7" Background="#4FFFFFFF" CornerRadius="3" HorizontalAlignment="Left" VerticalAlignment="Center">
-                        <Border x:Name="RemainingBar" Width="0" Height="7" Background="#FF70D88B" CornerRadius="3" HorizontalAlignment="Left" />
+                        <Border x:Name="OverviewRemainingBar" Width="0" Height="7" Background="#FF70D88B" CornerRadius="3" HorizontalAlignment="Left" />
                     </Border>
-                    <TextBlock x:Name="PercentText" Grid.Column="1" Text="--%" Margin="5,0,0,0" Foreground="#FFF3F3F3"
+                    <TextBlock x:Name="OverviewPercentText" Grid.Column="1" Text="--%" Margin="5,0,0,0" Foreground="#FFF3F3F3"
                                FontFamily="Segoe UI Variable Text, Segoe UI" FontWeight="SemiBold" FontSize="11.5" VerticalAlignment="Center" />
                 </Grid>
             </Grid>
@@ -73,6 +90,130 @@
                                FontFamily="Segoe UI Variable Text, Segoe UI" FontWeight="SemiBold" FontSize="11.5" VerticalAlignment="Center" />
                 </Grid>
             </Grid>
+        </Grid>
+        <Grid x:Name="CompactLayoutPanel" Visibility="Collapsed">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="88" />
+            </Grid.ColumnDefinitions>
+            <Grid Grid.Column="0" Margin="3,0,5,0" VerticalAlignment="Center">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="21" />
+                    <RowDefinition Height="21" />
+                </Grid.RowDefinitions>
+                <TextBlock x:Name="TimeText" Grid.Row="0" Text="Weekly Reset unavailable"
+                           Foreground="#FFD5D5D5" FontFamily="Segoe UI Variable Text, Segoe UI"
+                           FontWeight="Normal" FontSize="11.5" HorizontalAlignment="Left"
+                           VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                <Grid Grid.Row="1">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="108" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <Border Grid.Column="0" Width="108" Height="7" Background="#666A6A6A"
+                            CornerRadius="3" HorizontalAlignment="Left" VerticalAlignment="Center">
+                        <Border x:Name="RemainingBar" Width="0" Height="7" Background="#FF70D88B"
+                                CornerRadius="3" HorizontalAlignment="Left" />
+                    </Border>
+                    <TextBlock x:Name="PercentText" Grid.Column="1" Text="--%" Margin="4,0,0,0"
+                               Foreground="#FFF3F3F3" FontFamily="Segoe UI Variable Text, Segoe UI"
+                               FontWeight="SemiBold" FontSize="11.5" HorizontalAlignment="Left"
+                               VerticalAlignment="Center" />
+                </Grid>
+            </Grid>
+
+            <Grid Grid.Column="1" Width="79" Height="38" Margin="4,0"
+                  VerticalAlignment="Center" ToolTipService.ShowDuration="30000">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="13" />
+                    <RowDefinition Height="25" />
+                </Grid.RowDefinitions>
+                <TextBlock x:Name="TaskbarModeText" Text="DEFAULT" Foreground="#FFD7D7D7"
+                           FontFamily="Segoe UI Variable Text, Segoe UI" FontSize="9.5"
+                           FontWeight="SemiBold" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                <Grid Grid.Row="1" Margin="6,0" IsHitTestVisible="False">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <Ellipse Grid.Column="0" Width="3" Height="3" Fill="#FFB6B6B6" HorizontalAlignment="Left" />
+                    <Ellipse Grid.Column="1" Width="3" Height="3" Fill="#FF8A8A8A" HorizontalAlignment="Center" />
+                    <Ellipse Grid.Column="2" Width="3" Height="3" Fill="#FF8A8A8A" HorizontalAlignment="Center" />
+                    <Ellipse Grid.Column="3" Width="3" Height="3" Fill="#FF8A8A8A" HorizontalAlignment="Right" />
+                </Grid>
+                <Slider x:Name="TaskbarModeSlider" Grid.Row="1" Minimum="0" Maximum="3" Value="0" TickFrequency="1"
+                        IsSnapToTickEnabled="True" IsMoveToPointEnabled="True" Height="24"
+                        FocusVisualStyle="{x:Null}" Cursor="Hand">
+                    <Slider.Template>
+                        <ControlTemplate TargetType="Slider">
+                            <Grid x:Name="SliderSurface">
+                                <Border Height="7" Background="#FF4B4B4B" CornerRadius="4"
+                                        VerticalAlignment="Center" IsHitTestVisible="False" />
+                                <Border x:Name="SelectionFill" Height="7" Background="#FF48A7FF" CornerRadius="4"
+                                        HorizontalAlignment="Left" VerticalAlignment="Center" IsHitTestVisible="False">
+                                    <Border.Width>
+                                        <MultiBinding Converter="{StaticResource SliderProgressWidth}">
+                                            <Binding ElementName="SliderSurface" Path="ActualWidth" />
+                                            <Binding RelativeSource="{RelativeSource TemplatedParent}" Path="Value" />
+                                            <Binding RelativeSource="{RelativeSource TemplatedParent}" Path="Minimum" />
+                                            <Binding RelativeSource="{RelativeSource TemplatedParent}" Path="Maximum" />
+                                        </MultiBinding>
+                                    </Border.Width>
+                                </Border>
+                                <Track x:Name="PART_Track">
+                                    <Track.DecreaseRepeatButton>
+                                        <RepeatButton Command="Slider.DecreaseLarge" IsTabStop="False">
+                                            <RepeatButton.Template>
+                                                <ControlTemplate TargetType="RepeatButton">
+                                                    <Border Background="Transparent" Height="7" />
+                                                </ControlTemplate>
+                                            </RepeatButton.Template>
+                                        </RepeatButton>
+                                    </Track.DecreaseRepeatButton>
+                                    <Track.Thumb>
+                                        <Thumb Width="18" Height="18">
+                                            <Thumb.Template>
+                                                <ControlTemplate TargetType="Thumb">
+                                                    <Ellipse x:Name="ThumbCircle" Fill="#FFFFFFFF" Stroke="#22000000" StrokeThickness="1">
+                                                        <Ellipse.Effect>
+                                                            <DropShadowEffect BlurRadius="5" ShadowDepth="1" Opacity="0.35" />
+                                                        </Ellipse.Effect>
+                                                    </Ellipse>
+                                                    <ControlTemplate.Triggers>
+                                                        <Trigger Property="IsMouseOver" Value="True">
+                                                            <Setter TargetName="ThumbCircle" Property="Fill" Value="#FFF2F8FE" />
+                                                        </Trigger>
+                                                        <Trigger Property="IsDragging" Value="True">
+                                                            <Setter TargetName="ThumbCircle" Property="Stroke" Value="#FF48A7FF" />
+                                                            <Setter TargetName="ThumbCircle" Property="StrokeThickness" Value="2" />
+                                                        </Trigger>
+                                                        <Trigger Property="IsEnabled" Value="False">
+                                                            <Setter TargetName="ThumbCircle" Property="Opacity" Value="0.45" />
+                                                        </Trigger>
+                                                    </ControlTemplate.Triggers>
+                                                </ControlTemplate>
+                                            </Thumb.Template>
+                                        </Thumb>
+                                    </Track.Thumb>
+                                    <Track.IncreaseRepeatButton>
+                                        <RepeatButton Command="Slider.IncreaseLarge" IsTabStop="False">
+                                            <RepeatButton.Template>
+                                                <ControlTemplate TargetType="RepeatButton">
+                                                    <Border Background="Transparent" Height="7" />
+                                                </ControlTemplate>
+                                            </RepeatButton.Template>
+                                        </RepeatButton>
+                                    </Track.IncreaseRepeatButton>
+                                </Track>
+                            </Grid>
+                        </ControlTemplate>
+                    </Slider.Template>
+                </Slider>
+            </Grid>
+
+        </Grid>
         </Grid>
     </Border>
 </Window>

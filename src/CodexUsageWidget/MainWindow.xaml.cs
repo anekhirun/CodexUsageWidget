@@ -17,62 +17,76 @@ public partial class MainWindow : Window
     private static readonly SolidColorBrush AmberBrush = Brush("#FFF59E0B");
     private static readonly SolidColorBrush RedBrush = Brush("#FFEF4444");
     private static readonly SolidColorBrush BlueBrush = Brush("#FF5BAEFF");
+    private DateTimeOffset? _lastPulsedEventTime;
     private static readonly SolidColorBrush GrayBrush = Brush("#FF777777");
     private static readonly SolidColorBrush TextBrush = Brush("#FFF3F3F3");
     private static readonly SolidColorBrush MutedTextBrush = Brush("#FFAAAAAA");
 
     private readonly DispatcherTimer _refreshTimer = new();
     private readonly DispatcherTimer _taskbarTimer = new();
-    private readonly DispatcherTimer _sessionTimer = new();
     private readonly DispatcherTimer _refreshFeedbackTimer = new();
     private readonly string _configDirectory;
     private readonly string _stateFile;
     private readonly string _logFile;
+    private readonly ContextConfigCoordinator _contextConfigCoordinator;
 
     private WidgetState _state = new();
     private nint _windowHandle;
     private nint _taskbarHandle;
-    private bool _isEmbedded;
+    private bool _placementReady;
+    private System.Windows.Forms.Screen? _selectedScreen;
+    private System.Drawing.Rectangle _targetBounds;
     private bool _isDragging;
-    private bool _hiddenForAutoHide;
     private double _screenLeft;
     private double _screenRight = SystemParameters.PrimaryScreenWidth;
-    private double _windowTop;
     private double _widgetLeft;
+    private double _logicalWidgetWidth = 279;
     private double _dipPerPixel = 1;
     private int _dragStartX;
     private double _dragStartLeft;
     private string _lastLogMessage = string.Empty;
-    private DateTimeOffset? _lastPulsedEventTime;
-    private FileSystemWatcher? _sessionWatcher;
-    private bool _sessionRefreshQueued;
+    private bool _loadingContextMode;
+    private CancellationTokenSource? _contextModeChangeCts;
 
     public MainWindow()
     {
         InitializeComponent();
+        Opacity = 0;
 
         _configDirectory = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "CodexUsageWidget");
         Directory.CreateDirectory(_configDirectory);
         _stateFile = Path.Combine(_configDirectory, "widget-state.json");
         _logFile = Path.Combine(_configDirectory, "widget-errors.log");
+        _contextConfigCoordinator = ContextConfigCoordinator.CreateDefault(_configDirectory);
 
         SourceInitialized += OnSourceInitialized;
+        ContentRendered += OnContentRendered;
         Closed += OnClosed;
 
         Root.MouseLeftButtonDown += OnMouseLeftButtonDown;
         Root.MouseMove += OnMouseMove;
         Root.MouseLeftButtonUp += OnMouseLeftButtonUp;
+        Root.LostMouseCapture += (_, _) => FinishDrag();
 
         MoveLeftMenu.Click += (_, _) => SetTaskbarPosition(_screenLeft);
         PlaceWeatherMenu.Click += (_, _) => SetTaskbarPosition(_screenLeft + 205);
-        MoveRightMenu.Click += (_, _) => SetTaskbarPosition(_screenRight - Width);
+        MoveRightMenu.Click += (_, _) => SetTaskbarPosition(_screenRight - PhysicalWidgetWidth());
         NextDisplayMenu.Click += (_, _) => MoveToNextDisplay();
         RefreshMenu.Click += (_, _) => RefreshUsage(manualRequest: true);
-        ContextDefaultMenu.Click += (_, _) => ApplyContextMode(0);
-        Context300KMenu.Click += (_, _) => ApplyContextMode(1);
-        Context600KMenu.Click += (_, _) => ApplyContextMode(2);
-        Context1MMenu.Click += (_, _) => ApplyContextMode(3);
+        TaskbarModeSlider.ValueChanged += OnTaskbarModeSliderValueChanged;
+        ContextDefaultMenu.Click += async (_, _) => await ApplyContextSelectionAsync(0, false);
+        Context300KMenu.Click += async (_, _) => await ApplyContextSelectionAsync(1, false);
+        Context600KMenu.Click += async (_, _) => await ApplyContextSelectionAsync(2, false);
+        Context1MMenu.Click += async (_, _) => await ApplyContextSelectionAsync(3, false);
+        CompactLayoutMenu.Click += (_, _) =>
+        {
+            _state.CompactLayout = CompactLayoutMenu.IsChecked;
+            ApplyLayout();
+            SyncDisplayGeometry();
+            PositionAnchoredWidget();
+            SaveState();
+        };
         Refresh30Menu.Click += (_, _) => SetRefreshMode("30 seconds");
         Refresh2MinuteMenu.Click += (_, _) => SetRefreshMode("2 minutes");
         Refresh5MinuteMenu.Click += (_, _) => SetRefreshMode("5 minutes");
@@ -88,25 +102,14 @@ public partial class MainWindow : Window
         _refreshTimer.Tick += (_, _) =>
         {
             if (_state.RefreshMode != "Manual only") RefreshUsage();
-            SyncDisplayGeometry();
         };
         _taskbarTimer.Interval = TimeSpan.FromSeconds(1);
         _taskbarTimer.Tick += (_, _) =>
         {
-            nint currentTaskbar = FindTaskbarForSelectedDisplay();
-            if (currentTaskbar != _taskbarHandle)
-            {
-                SyncDisplayGeometry();
-                AttachWidgetToTaskbar();
-            }
-        };
-        _sessionTimer.Interval = TimeSpan.FromMilliseconds(500);
-        _sessionTimer.Tick += (_, _) =>
-        {
-            _sessionTimer.Stop();
-            if (!_sessionRefreshQueued || _state.RefreshMode == "Manual only") return;
-            _sessionRefreshQueued = false;
-            RefreshUsage();
+            if (!_placementReady || _isDragging || Root.IsMouseCaptureWithin ||
+                Root.ContextMenu?.IsOpen == true) return;
+            SyncDisplayGeometry();
+            PositionAnchoredWidget();
         };
         _refreshFeedbackTimer.Interval = TimeSpan.FromSeconds(6);
         _refreshFeedbackTimer.Tick += (_, _) =>
@@ -119,35 +122,49 @@ public partial class MainWindow : Window
     private void OnSourceInitialized(object? sender, EventArgs e)
     {
         _windowHandle = new WindowInteropHelper(this).Handle;
+        if (double.IsFinite(Width) && Width > 1) _logicalWidgetWidth = Width;
         _dipPerPixel = PresentationSource.FromVisual(this)?.CompositionTarget?.TransformFromDevice.M11 ?? 1;
         LoadState();
         _widgetLeft = _state.Left;
         ApplyStateToMenus();
-        ReloadContextModeMenu();
+        ApplyLayout();
+        ReloadTaskbarContextMode();
         SetRefreshTimerInterval();
-        ConfigureSessionMonitoring();
         SyncDisplayGeometry();
-        SetTaskbarPosition(_widgetLeft);
-        AttachWidgetToTaskbar();
         RefreshUsage();
         _refreshTimer.Start();
         _taskbarTimer.Start();
+    }
+
+    private void OnContentRendered(object? sender, EventArgs e)
+    {
+        ContentRendered -= OnContentRendered;
+        _placementReady = true;
+        Topmost = true;
+        SyncDisplayGeometry();
+        PositionAnchoredWidget();
+        Opacity = 1;
     }
 
     private void OnClosed(object? sender, EventArgs e)
     {
         _refreshTimer.Stop();
         _taskbarTimer.Stop();
-        _sessionTimer.Stop();
         _refreshFeedbackTimer.Stop();
-        _sessionWatcher?.Dispose();
+        _contextModeChangeCts?.Cancel();
+        _contextModeChangeCts = null;
         SaveState();
         System.Windows.Application.Current.Shutdown();
     }
 
-    private void ReloadContextModeMenu()
+    private void ReloadTaskbarContextMode()
     {
         ContextConfigState state = CodexConfigService.ReadState(CodexConfigService.GlobalConfigPath);
+        _loadingContextMode = true;
+        TaskbarModeSlider.Value = state.IsCustom ? CustomSliderPosition(state) : state.Mode!.Index;
+        TaskbarModeText.Text = state.IsCustom ? "CUSTOM" : CompactModeLabel(state.Mode!);
+        TaskbarModeSlider.IsEnabled = true;
+        _loadingContextMode = false;
         ContextDefaultMenu.IsChecked = state.Mode?.Index == 0;
         Context300KMenu.IsChecked = state.Mode?.Index == 1;
         Context600KMenu.IsChecked = state.Mode?.Index == 2;
@@ -158,19 +175,78 @@ public partial class MainWindow : Window
             UpdateContextToolTip(state.Mode!);
     }
 
-    private void ApplyContextMode(int index)
+    private async void OnTaskbarModeSliderValueChanged(
+        object sender,
+        RoutedPropertyChangedEventArgs<double> eventArgs)
     {
-        ContextMode mode = CodexConfigService.Modes[index];
-        ConfigWriteResult result = CodexConfigService.ApplyGlobal(mode);
-        ReloadContextModeMenu();
-        ContextModeMenu.ToolTip = result.Message;
+        if (_loadingContextMode) return;
+        await ApplyContextSelectionAsync((int)Math.Round(TaskbarModeSlider.Value), true);
+    }
+
+    private async Task ApplyContextSelectionAsync(int index, bool waitForDrag)
+    {
+        ContextMode selectedMode = CodexConfigService.Modes[index];
+        TaskbarModeText.Text = CompactModeLabel(selectedMode);
+        UpdateContextToolTip(selectedMode, "Applying selection…");
+
+        var cancellation = new CancellationTokenSource();
+        CancellationTokenSource? previous = _contextModeChangeCts;
+        _contextModeChangeCts = cancellation;
+        previous?.Cancel();
+
+        try
+        {
+            await Task.Delay(TimeSpan.FromMilliseconds(300), cancellation.Token);
+            while (waitForDrag && TaskbarModeSlider.IsMouseCaptureWithin)
+                await Task.Delay(TimeSpan.FromMilliseconds(50), cancellation.Token);
+            ContextMode mode = selectedMode;
+            TaskbarModeSlider.IsEnabled = false;
+            ContextModeMenu.IsEnabled = false;
+
+            ConfigWriteResult result = await _contextConfigCoordinator.ApplyGlobalAsync(mode, cancellation.Token);
+            cancellation.Token.ThrowIfCancellationRequested();
+            if (!result.Success)
+            {
+                ReloadTaskbarContextMode();
+                TaskbarModeText.Text = "ERROR";
+                string currentState = TaskbarModeSlider.ToolTip as string ?? "Current global setting preserved";
+                TaskbarModeSlider.ToolTip = $"{result.Message}\n{currentState}";
+                ContextModeMenu.ToolTip = TaskbarModeSlider.ToolTip;
+                return;
+            }
+
+            ReloadTaskbarContextMode();
+            UpdateContextToolTip(mode, result.Message);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception exception)
+        {
+            ReloadTaskbarContextMode();
+            TaskbarModeText.Text = "ERROR";
+            TaskbarModeSlider.ToolTip = $"Context update failed: {exception.Message}";
+            ContextModeMenu.ToolTip = TaskbarModeSlider.ToolTip;
+            WriteLog($"Context update failed: {exception.Message}");
+        }
+        finally
+        {
+            if (ReferenceEquals(_contextModeChangeCts, cancellation))
+            {
+                _contextModeChangeCts = null;
+                TaskbarModeSlider.IsEnabled = true;
+                ContextModeMenu.IsEnabled = true;
+            }
+            cancellation.Dispose();
+        }
     }
 
     private void UpdateContextToolTip(ContextMode mode, string? resultMessage = null)
     {
         string summary = $"{mode.Name} · {mode.ContextLabel} · Global Codex setting";
+        TaskbarModeSlider.ToolTip = resultMessage is null ? summary : $"{resultMessage}\n{summary}";
         ContextModeMenu.Header = $"Context mode ({CompactModeLabel(mode)})";
-        ContextModeMenu.ToolTip = resultMessage is null ? summary : $"{resultMessage}\n{summary}";
+        ContextModeMenu.ToolTip = TaskbarModeSlider.ToolTip;
     }
 
     private void UpdateCustomContextToolTip(ContextConfigState state)
@@ -178,9 +254,24 @@ public partial class MainWindow : Window
         string detail = state.ReadFailed
             ? "Could not read the current context settings"
             : $"{FormatTokenCount(state.ContextWindow)} context · {FormatTokenCount(state.CompactLimit)} auto-compaction";
-        ContextModeMenu.Header = "Context mode (Custom)";
-        ContextModeMenu.ToolTip =
+        TaskbarModeSlider.ToolTip =
             $"Custom · {detail} · config.toml is preserved until you select a preset";
+        ContextModeMenu.Header = "Context mode (Custom)";
+        ContextModeMenu.ToolTip = TaskbarModeSlider.ToolTip;
+    }
+
+    private static double CustomSliderPosition(ContextConfigState state)
+    {
+        if (state.ContextWindow is null) return 0.5;
+
+        ContextMode nearest = CodexConfigService.Modes
+            .Where(mode => !mode.IsDefault)
+            .OrderBy(mode => Math.Abs((long)mode.ContextWindow!.Value - state.ContextWindow.Value) +
+                             (state.CompactLimit is null
+                                 ? 0
+                                 : Math.Abs((long)mode.CompactLimit!.Value - state.CompactLimit.Value) / 2))
+            .First();
+        return nearest.Index >= 3 ? 2.5 : nearest.Index + 0.5;
     }
 
     private static string FormatTokenCount(int? value)
@@ -223,7 +314,6 @@ public partial class MainWindow : Window
 
     private void SaveState()
     {
-        _state.Left = _widgetLeft;
         try
         {
             string json = JsonSerializer.Serialize(_state, new JsonSerializerOptions { WriteIndented = true });
@@ -260,12 +350,30 @@ public partial class MainWindow : Window
         RefreshManualMenu.IsChecked = _state.RefreshMode == "Manual only";
     }
 
+    private void ApplyLayout()
+    {
+        _logicalWidgetWidth = _state.CompactLayout ? 279 : 385;
+        Width = _logicalWidgetWidth;
+        CompactLayoutMenu.IsChecked = _state.CompactLayout;
+        CompactLayoutPanel.Visibility = _state.CompactLayout ? Visibility.Visible : Visibility.Collapsed;
+        OverviewLayoutPanel.Visibility = _state.CompactLayout ? Visibility.Collapsed : Visibility.Visible;
+        if (_state.CompactLayout)
+        {
+            Root.ClearValue(System.Windows.Controls.Border.BackgroundProperty);
+            Root.ClearValue(System.Windows.Controls.Border.BorderBrushProperty);
+        }
+        else
+        {
+            Root.Background = System.Windows.Media.Brushes.Transparent;
+            Root.BorderBrush = Brush("#28FFFFFF");
+        }
+    }
+
     private void SetRefreshMode(string mode)
     {
         _state.RefreshMode = mode;
         ApplyStateToMenus();
         SetRefreshTimerInterval();
-        ConfigureSessionMonitoring();
         SaveState();
     }
 
@@ -281,60 +389,21 @@ public partial class MainWindow : Window
         _refreshTimer.Interval = TimeSpan.FromSeconds(seconds);
     }
 
-    private void ConfigureSessionMonitoring()
-    {
-        _sessionRefreshQueued = false;
-        _sessionTimer.Stop();
-        _sessionWatcher?.Dispose();
-        _sessionWatcher = null;
-        if (_state.RefreshMode == "Manual only" || !Directory.Exists(UsageReader.SessionRoot)) return;
-
-        try
-        {
-            _sessionWatcher = new FileSystemWatcher(UsageReader.SessionRoot, "*.jsonl")
-            {
-                IncludeSubdirectories = true,
-                NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size,
-                EnableRaisingEvents = true
-            };
-            _sessionWatcher.Changed += OnSessionFileChanged;
-            _sessionWatcher.Created += OnSessionFileChanged;
-            _sessionWatcher.Renamed += OnSessionFileRenamed;
-            _sessionWatcher.Error += (_, _) => QueueSessionRefresh();
-        }
-        catch (Exception exception)
-        {
-            WriteLog($"Could not monitor Codex sessions: {exception.Message}");
-        }
-    }
-
-    private void OnSessionFileChanged(object sender, FileSystemEventArgs e) => QueueSessionRefresh();
-
-    private void OnSessionFileRenamed(object sender, RenamedEventArgs e) => QueueSessionRefresh();
-
-    private void QueueSessionRefresh()
-    {
-        Dispatcher.InvokeAsync(() =>
-        {
-            if (_state.RefreshMode == "Manual only") return;
-            _sessionRefreshQueued = true;
-            _sessionTimer.Stop();
-            _sessionTimer.Start();
-        });
-    }
-
     private void RefreshUsage(bool manualRequest = false)
     {
         DateTimeOffset checkedAt = DateTimeOffset.Now;
         UsageSnapshot? snapshot = UsageReader.GetLatestSnapshot();
         if (snapshot is null)
         {
-            PercentText.Text = "--%";
-            TimeText.Text = "WEEKLY · Unavailable";
-            RemainingBar.Width = 0;
-            RemainingBar.Background = GrayBrush;
-            PercentText.Foreground = MutedTextBrush;
+            OverviewPercentText.Text = "--%";
+            OverviewTimeText.Text = "WEEKLY · Unavailable";
+            OverviewRemainingBar.Width = 0;
+            OverviewRemainingBar.Background = GrayBrush;
+            OverviewPercentText.Foreground = MutedTextBrush;
             SetShortUsageUnavailable();
+            PercentText.Text = "--%";
+            TimeText.Text = "Weekly Reset unavailable";
+            RemainingBar.Width = 0;
             Root.ToolTip = "ChatGPT Codex - No usage data found";
             WriteLog("No Codex usage data found");
             if (manualRequest) ShowRefreshFeedback(checkedAt, hasUsageData: false);
@@ -342,32 +411,32 @@ public partial class MainWindow : Window
         }
 
         double left = Math.Clamp(Math.Round(100 - snapshot.Long.UsedPercent), 0, 100);
-        PercentText.Text = $"{left:0}%";
-        RemainingBar.Width = 112 * left / 100;
+        OverviewPercentText.Text = $"{left:0}%";
+        OverviewRemainingBar.Width = 112 * left / 100;
 
         TimeSpan age = DateTimeOffset.Now - snapshot.EventTime;
         bool stale = age.TotalMinutes > 5;
         string freshness = stale ? "Data may be stale" : "Live";
         if (stale)
         {
-            RemainingBar.Background = GrayBrush;
-            PercentText.Foreground = MutedTextBrush;
+            OverviewRemainingBar.Background = GrayBrush;
+            OverviewPercentText.Foreground = MutedTextBrush;
         }
         else
         {
-            RemainingBar.Background = left <= 10 ? RedBrush : left <= 30 ? AmberBrush : GreenBrush;
-            PercentText.Foreground = TextBrush;
+            OverviewRemainingBar.Background = left <= 10 ? RedBrush : left <= 30 ? AmberBrush : GreenBrush;
+            OverviewPercentText.Foreground = TextBrush;
         }
 
         string resetText = FormatResetCountdown(snapshot.Long.ResetsAt);
         if (snapshot.Long.ResetsAt is long resetUnix)
         {
             DateTimeOffset reset = DateTimeOffset.FromUnixTimeSeconds(resetUnix).ToLocalTime();
-            TimeText.Text = $"WEEKLY · Resets {reset.ToString("MMM d", CultureInfo.InvariantCulture)}";
+            OverviewTimeText.Text = $"WEEKLY · Resets {reset.ToString("MMM d", CultureInfo.InvariantCulture)}";
         }
         else
         {
-            TimeText.Text = "WEEKLY · Reset unavailable";
+            OverviewTimeText.Text = "WEEKLY · Reset unavailable";
         }
 
         double? shortLeft = UpdateShortUsage(snapshot.Short, stale);
@@ -377,6 +446,11 @@ public partial class MainWindow : Window
                          $"{freshness}; Codex data {snapshot.EventTime:HH:mm:ss}; checked {checkedAt:HH:mm:ss}";
         if (!IsCodexRunning()) tooltip += "; Codex is not running";
         Root.ToolTip = tooltip;
+        PercentText.Text = OverviewPercentText.Text;
+        PercentText.Foreground = OverviewPercentText.Foreground;
+        RemainingBar.Width = 108 * left / 100;
+        RemainingBar.Background = OverviewRemainingBar.Background;
+        TimeText.Text = OverviewTimeText.Text.Replace("WEEKLY · ", "Weekly ", StringComparison.Ordinal);
         PulseStatusForNewEvent(snapshot.EventTime);
         if (manualRequest) ShowRefreshFeedback(checkedAt, hasUsageData: true);
     }
@@ -458,175 +532,133 @@ public partial class MainWindow : Window
 
     private void OnMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
-        if (_state.Locked || e.ChangedButton != MouseButton.Left) return;
-        _isDragging = true;
+        if (_state.Locked || e.ChangedButton != MouseButton.Left ||
+            TaskbarModeSlider.IsMouseOver) return;
+        // Refresh the monitor and DPI before taking the drag origin.
+        SyncDisplayGeometry();
+        PositionAnchoredWidget();
         _dragStartX = System.Windows.Forms.Cursor.Position.X;
         _dragStartLeft = _widgetLeft;
-        Root.CaptureMouse();
-        e.Handled = true;
+        _isDragging = Root.CaptureMouse();
+        e.Handled = _isDragging;
     }
 
     private void OnMouseMove(object sender, System.Windows.Input.MouseEventArgs e)
     {
-        if (!_isDragging || e.LeftButton != MouseButtonState.Pressed) return;
+        if (!_isDragging) return;
+        if (e.LeftButton != MouseButtonState.Pressed)
+        {
+            FinishDrag();
+            return;
+        }
         int deltaPixels = System.Windows.Forms.Cursor.Position.X - _dragStartX;
-        double target = _dragStartLeft + deltaPixels * _dipPerPixel;
-        _widgetLeft = Math.Clamp(target, _screenLeft, Math.Max(_screenLeft, _screenRight - Width));
-        if (_isEmbedded) PositionEmbeddedWidget(); else Left = _widgetLeft;
+        RememberPosition(_dragStartLeft + deltaPixels);
+        SyncDisplayGeometry();
+        PositionAnchoredWidget();
         e.Handled = true;
     }
 
     private void OnMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
     {
         if (!_isDragging) return;
-        _isDragging = false;
-        Root.ReleaseMouseCapture();
-        SetTaskbarPosition(_widgetLeft);
+        FinishDrag();
         e.Handled = true;
+    }
+
+    private void FinishDrag()
+    {
+        if (!_isDragging) return;
+        _isDragging = false;
+        if (Root.IsMouseCaptured) Root.ReleaseMouseCapture();
+        SaveState();
     }
 
     private void MoveToNextDisplay()
     {
-        int count = System.Windows.Forms.Screen.AllScreens.Length;
-        if (count == 0) return;
-        _state.ScreenIndex = (_state.ScreenIndex + 1) % count;
+        var screens = System.Windows.Forms.Screen.AllScreens;
+        if (screens.Length == 0) return;
+        int current = Array.FindIndex(screens, screen => screen.DeviceName == _selectedScreen?.DeviceName);
+        var next = screens[(current + 1) % screens.Length];
+        _state.ScreenDeviceName = next.DeviceName;
+        _state.HorizontalOffset = 0;
         SyncDisplayGeometry();
         SetTaskbarPosition(_screenLeft);
     }
 
+    private void RememberPosition(double left)
+    {
+        if (_selectedScreen is null) return;
+        _widgetLeft = Math.Clamp(double.IsFinite(left) ? left : _screenLeft,
+            _screenLeft, Math.Max(_screenLeft, _screenRight - PhysicalWidgetWidth()));
+        _state.Left = _widgetLeft;
+        _state.ScreenDeviceName = _selectedScreen.DeviceName;
+        _state.ScreenIndex = Array.FindIndex(System.Windows.Forms.Screen.AllScreens,
+            screen => screen.DeviceName == _selectedScreen.DeviceName);
+        _state.HorizontalOffset = (_widgetLeft - _screenLeft) * _dipPerPixel;
+    }
+
     private void SetTaskbarPosition(double left)
     {
-        _widgetLeft = Math.Clamp(left, _screenLeft, Math.Max(_screenLeft, _screenRight - Width));
-        if (_isEmbedded)
-        {
-            PositionEmbeddedWidget();
-        }
-        else
-        {
-            Left = _widgetLeft;
-            Top = _windowTop;
-        }
+        RememberPosition(left);
+        SyncDisplayGeometry();
+        PositionAnchoredWidget();
         SaveState();
     }
 
-    private void PositionEmbeddedWidget()
+    private double PhysicalWidgetWidth() => _logicalWidgetWidth / _dipPerPixel;
+
+    private void PositionAnchoredWidget()
     {
-        if (!_isEmbedded || _windowHandle == 0 || _taskbarHandle == 0) return;
-        if (!NativeMethods.GetWindowRect(_taskbarHandle, out NativeMethods.Rect rect)) return;
-        double scale = _dipPerPixel > 0 ? _dipPerPixel : 1;
-        int screenLeftPixels = (int)Math.Round(_widgetLeft / scale);
-        int childX = screenLeftPixels - rect.Left;
-        int childWidth = (int)Math.Round(Width / scale);
-        int childHeight = Math.Max(1, rect.Bottom - rect.Top);
-        NativeMethods.SetWindowPos(
-            _windowHandle, 0, childX, 0, childWidth, childHeight,
-            NativeMethods.SwpNoActivate | NativeMethods.SwpNoZOrder);
+        if (!_placementReady || _windowHandle == 0 || _selectedScreen is null) return;
+        var target = _targetBounds;
+        // Keep WPF's layout size consistent with the native window size.
+        Height = target.Height * _dipPerPixel;
+        uint flags = NativeMethods.SwpNoActivate | NativeMethods.SwpShowWindow;
+        if (NativeMethods.GetWindowRect(_windowHandle, out NativeMethods.Rect current))
+        {
+            if (current.Left == target.Left && current.Top == target.Top)
+                flags |= NativeMethods.SwpNoMove;
+            if (current.Right - current.Left == target.Width && current.Bottom - current.Top == target.Height)
+                flags |= NativeMethods.SwpNoSize;
+        }
+        if (!NativeMethods.SetWindowPos(_windowHandle, NativeMethods.HwndTopmost,
+            target.Left, target.Top, target.Width, target.Height, flags))
+            WriteLog($"Could not position widget: {System.Runtime.InteropServices.Marshal.GetLastWin32Error()}");
     }
 
     private void SyncDisplayGeometry()
     {
-        if (_isDragging) return;
-        System.Windows.Forms.Screen[] screens = System.Windows.Forms.Screen.AllScreens;
+        var screens = System.Windows.Forms.Screen.AllScreens;
         if (screens.Length == 0) return;
-        if (_state.ScreenIndex < 0 || _state.ScreenIndex >= screens.Length)
+        var preferred = Array.Find(screens, screen => screen.DeviceName == _state.ScreenDeviceName);
+        var screen = preferred ??
+            (_state.ScreenDeviceName is null && _state.ScreenIndex >= 0 && _state.ScreenIndex < screens.Length
+                ? screens[_state.ScreenIndex]
+                : Array.Find(screens, item => item.Primary) ?? screens[0]);
+        _selectedScreen = screen;
+        _dipPerPixel = PresentationSource.FromVisual(this)?.CompositionTarget?.TransformFromDevice.M11 ?? 1;
+        if (!double.IsFinite(_dipPerPixel) || _dipPerPixel <= 0) _dipPerPixel = 1;
+        _screenLeft = screen.Bounds.Left;
+        _screenRight = screen.Bounds.Right;
+
+        if (_state.ScreenDeviceName is null || _state.HorizontalOffset is null)
         {
-            int primaryIndex = Array.FindIndex(screens, screen => screen.Primary);
-            _state.ScreenIndex = primaryIndex >= 0 ? primaryIndex : 0;
+            // Migrate absolute coordinates once. Do not persist temporary monitor fallbacks.
+            _state.ScreenDeviceName = screen.DeviceName;
+            _state.HorizontalOffset = WidgetPlacement.MigrateLegacyOffset(_state.Left, _screenLeft, _dipPerPixel);
         }
 
-        _dipPerPixel = PresentationSource.FromVisual(this)?.CompositionTarget?.TransformFromDevice.M11 ?? _dipPerPixel;
-        var screen = screens[_state.ScreenIndex];
-        var bounds = screen.Bounds;
-        var work = screen.WorkingArea;
-        _screenLeft = bounds.Left * _dipPerPixel;
-        _screenRight = bounds.Right * _dipPerPixel;
-
-        if (_isEmbedded)
+        _taskbarHandle = NativeMethods.FindTaskbarForBounds(new NativeMethods.Rect
         {
-            _widgetLeft = Math.Clamp(_widgetLeft, _screenLeft, Math.Max(_screenLeft, _screenRight - Width));
-            PositionEmbeddedWidget();
-            return;
-        }
-
-        double bottomGap = (bounds.Bottom - work.Bottom) * _dipPerPixel;
-        double topGap = (work.Top - bounds.Top) * _dipPerPixel;
-        double targetHeight;
-        if (bottomGap >= 20)
-        {
-            ShowAfterAutoHide();
-            _windowTop = work.Bottom * _dipPerPixel;
-            targetHeight = bottomGap;
-        }
-        else if (topGap >= 20)
-        {
-            ShowAfterAutoHide();
-            _windowTop = bounds.Top * _dipPerPixel;
-            targetHeight = topGap;
-        }
-        else
-        {
-            bool nearEdge = System.Windows.Forms.Cursor.Position.Y >= bounds.Bottom - 64;
-            bool taskbarActive = NativeMethods.GetForegroundWindow() == _taskbarHandle;
-            if (!nearEdge && !taskbarActive)
-            {
-                if (IsVisible) Hide();
-                _hiddenForAutoHide = true;
-                return;
-            }
-            ShowAfterAutoHide();
-            targetHeight = 48;
-            _windowTop = bounds.Bottom * _dipPerPixel - targetHeight;
-        }
-
-        Height = targetHeight;
-        Top = _windowTop;
-        Left = Math.Clamp(_widgetLeft, _screenLeft, Math.Max(_screenLeft, _screenRight - Width));
-    }
-
-    private void ShowAfterAutoHide()
-    {
-        if (!_hiddenForAutoHide) return;
-        Show();
-        _hiddenForAutoHide = false;
-    }
-
-    private void AttachWidgetToTaskbar()
-    {
-        if (_windowHandle == 0) return;
-        nint taskbar = FindTaskbarForSelectedDisplay();
-        if (taskbar == 0) return;
-
-        long style = NativeMethods.GetWindowLongPtr(_windowHandle, NativeMethods.GwlStyle).ToInt64();
-        long childStyle = (style | NativeMethods.WsChild) & ~NativeMethods.WsPopup;
-        NativeMethods.SetWindowLongPtr(_windowHandle, NativeMethods.GwlStyle, new nint(childStyle));
-        NativeMethods.SetParent(_windowHandle, taskbar);
-        _taskbarHandle = taskbar;
-        _isEmbedded = NativeMethods.GetParent(_windowHandle) == taskbar;
-        if (_isEmbedded)
-        {
-            Topmost = false;
-            PositionEmbeddedWidget();
-        }
-        else
-        {
-            Topmost = true;
-            WriteLog("Could not embed widget into the Windows taskbar");
-        }
-    }
-
-    private nint FindTaskbarForSelectedDisplay()
-    {
-        System.Windows.Forms.Screen[] screens = System.Windows.Forms.Screen.AllScreens;
-        if (screens.Length == 0) return NativeMethods.FindWindow("Shell_TrayWnd", null);
-        int index = Math.Clamp(_state.ScreenIndex, 0, screens.Length - 1);
-        System.Drawing.Rectangle bounds = screens[index].Bounds;
-        return NativeMethods.FindTaskbarForBounds(new NativeMethods.Rect
-        {
-            Left = bounds.Left,
-            Top = bounds.Top,
-            Right = bounds.Right,
-            Bottom = bounds.Bottom
+            Left = screen.Bounds.Left, Top = screen.Bounds.Top,
+            Right = screen.Bounds.Right, Bottom = screen.Bounds.Bottom
         });
+        System.Drawing.Rectangle? taskbar = null;
+        if (_taskbarHandle != 0 && NativeMethods.GetWindowRect(_taskbarHandle, out NativeMethods.Rect rect))
+            taskbar = System.Drawing.Rectangle.FromLTRB(rect.Left, rect.Top, rect.Right, rect.Bottom);
+        _targetBounds = WidgetPlacement.Calculate(screen.Bounds, screen.WorkingArea, taskbar,
+            _state.HorizontalOffset ?? 0, 1 / _dipPerPixel, _logicalWidgetWidth);
+        _widgetLeft = _targetBounds.Left;
     }
 
     private static SolidColorBrush Brush(string color) =>

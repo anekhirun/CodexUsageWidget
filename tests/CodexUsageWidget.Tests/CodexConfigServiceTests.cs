@@ -31,6 +31,7 @@ public sealed class CodexConfigServiceTests : IDisposable
         Assert.Contains("model_context_window = 1000000", topLevel);
         Assert.Contains("model_auto_compact_token_limit = 900000", topLevel);
         Assert.Contains("js_repl = true", updated);
+        Assert.Contains("Project .codex/config.toml overrides still take priority", result.Message);
     }
 
     [Fact]
@@ -120,6 +121,20 @@ public sealed class CodexConfigServiceTests : IDisposable
     }
 
     [Fact]
+    public void ApplyingCustomPresetDoesNotIntroduceAModelSetting()
+    {
+        string configPath = Path.Combine(_testDirectory, "config.toml");
+
+        ConfigWriteResult result = CodexConfigService.ApplyToPath(configPath, CodexConfigService.Modes[2]);
+
+        Assert.True(result.Success, result.Message);
+        string updated = File.ReadAllText(configPath);
+        Assert.DoesNotMatch(@"(?m)^\s*model\s*=", updated);
+        Assert.Contains("model_context_window = 600000", updated);
+        Assert.Contains("model_auto_compact_token_limit = 500000", updated);
+    }
+
+    [Fact]
     public void DefaultDoesNotCreateAnEmptyConfig()
     {
         string configPath = Path.Combine(_testDirectory, "config.toml");
@@ -131,7 +146,7 @@ public sealed class CodexConfigServiceTests : IDisposable
     }
 
     [Fact]
-    public void CustomCatalogKeepsMaximumCeilingWhileDefaultRestoresBaseContext()
+    public void CustomCatalogBootstrapsGpt56OnceAndThenStaysStable()
     {
         string catalogPath = Path.Combine(_testDirectory, "models.json");
         File.WriteAllText(
@@ -141,6 +156,21 @@ public sealed class CodexConfigServiceTests : IDisposable
               "models": [
                 {
                   "slug": "gpt-5.6-sol",
+                  "context_window": 272000,
+                  "max_context_window": 272000
+                },
+                {
+                  "slug": "gpt-5.6-terra",
+                  "context_window": 272000,
+                  "max_context_window": 272000
+                },
+                {
+                  "slug": "gpt-5.6-luna",
+                  "context_window": 272000,
+                  "max_context_window": 272000
+                },
+                {
+                  "slug": "gpt-5.4",
                   "context_window": 272000,
                   "max_context_window": 272000
                 }
@@ -153,21 +183,68 @@ public sealed class CodexConfigServiceTests : IDisposable
         ContextMode large = CodexConfigService.Modes.Single(mode => mode.Name == "Large Codebase");
         ContextMode investigation = CodexConfigService.Modes.Single(mode => mode.Name == "Long-Running Investigation");
 
-        Assert.True(CodexConfigService.ApplyToPath(configPath, large).Success);
-        Assert.Equal(1_000_000, ReadCatalogNumber(catalogPath, "max_context_window"));
-        Assert.Equal(272_000, ReadCatalogNumber(catalogPath, "context_window"));
-        Assert.True(File.Exists(catalogPath + ".codex-usage-widget.bak"));
-        Assert.Equal(
-            272_000,
-            ReadCatalogNumber(catalogPath + ".codex-usage-widget.bak", "max_context_window"));
+        ConfigWriteResult first = CodexConfigService.ApplyToPath(configPath, large);
 
-        Assert.True(CodexConfigService.ApplyToPath(configPath, investigation).Success);
-        Assert.Equal(1_000_000, ReadCatalogNumber(catalogPath, "max_context_window"));
+        Assert.True(first.Success, first.Message);
+        Assert.Contains("Restart Codex once", first.Message);
+        foreach (string slug in new[] { "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna" })
+        {
+            Assert.Equal(272_000, ReadCatalogNumber(catalogPath, slug, "context_window"));
+            Assert.Equal(1_050_000, ReadCatalogNumber(catalogPath, slug, "max_context_window"));
+        }
+        Assert.Equal(272_000, ReadCatalogNumber(catalogPath, "gpt-5.4", "max_context_window"));
+        Assert.True(File.Exists(catalogPath + ".codex-usage-widget.bak"));
+        Assert.Equal(272_000, ReadCatalogNumber(
+            catalogPath + ".codex-usage-widget.bak", "gpt-5.6-sol", "max_context_window"));
+
+        string bootstrappedCatalog = File.ReadAllText(catalogPath);
+        ConfigWriteResult second = CodexConfigService.ApplyToPath(configPath, investigation);
+
+        Assert.True(second.Success, second.Message);
+        Assert.Contains("no restart is required", second.Message);
+        Assert.Equal(bootstrappedCatalog, File.ReadAllText(catalogPath));
 
         Assert.True(CodexConfigService.ApplyToPath(configPath, CodexConfigService.Modes[0]).Success);
-        Assert.Equal(1_000_000, ReadCatalogNumber(catalogPath, "max_context_window"));
-        Assert.Equal(272_000, ReadCatalogNumber(catalogPath, "context_window"));
+        Assert.Equal(bootstrappedCatalog, File.ReadAllText(catalogPath));
         Assert.DoesNotContain("model_context_window", File.ReadAllText(configPath));
+    }
+
+    [Fact]
+    public void CatalogBootstrapPreservesUserContextEditsWhenBackupExists()
+    {
+        string catalogPath = Path.Combine(_testDirectory, "models.json");
+        string backupPath = catalogPath + ".codex-usage-widget.bak";
+        File.WriteAllText(catalogPath, ModelCatalogJson(600_000, 600_000));
+        File.WriteAllText(backupPath, ModelCatalogJson(272_000, 272_000));
+        string configPath = Path.Combine(_testDirectory, "config.toml");
+        File.WriteAllText(configPath, $"model_catalog_json = {JsonSerializer.Serialize(catalogPath)}\n");
+
+        ConfigWriteResult result = CodexConfigService.ApplyToPath(configPath, CodexConfigService.Modes[2]);
+
+        Assert.True(result.Success, result.Message);
+        Assert.Equal(600_000, ReadCatalogNumber(catalogPath, "gpt-5.6-sol", "context_window"));
+        Assert.Equal(ModelCatalogJson(272_000, 272_000), File.ReadAllText(backupPath));
+        Assert.Equal(1_050_000, ReadCatalogNumber(catalogPath, "gpt-5.6-sol", "max_context_window"));
+    }
+
+    [Fact]
+    public void CatalogWithoutGpt56LeavesCatalogUnchangedAndAppliesConfig()
+    {
+        string catalogPath = Path.Combine(_testDirectory, "models.json");
+        string catalog = "{ \"models\": [{ \"slug\": \"gpt-5.4\", \"max_context_window\": 272000 }] }";
+        File.WriteAllText(catalogPath, catalog);
+        string configPath = Path.Combine(_testDirectory, "config.toml");
+        string config = $"model_catalog_json = {JsonSerializer.Serialize(catalogPath)}\n";
+        File.WriteAllText(configPath, config);
+
+        ConfigWriteResult result = CodexConfigService.ApplyToPath(configPath, CodexConfigService.Modes[2]);
+
+        Assert.True(result.Success, result.Message);
+        string updated = File.ReadAllText(configPath);
+        Assert.Contains("model_context_window = 600000", updated);
+        Assert.Contains("model_auto_compact_token_limit = 500000", updated);
+        Assert.Contains(config.Trim(), updated);
+        Assert.Equal(catalog, File.ReadAllText(catalogPath));
     }
 
     [Fact]
@@ -219,18 +296,44 @@ public sealed class CodexConfigServiceTests : IDisposable
     }
 
     [Fact]
-    public void UsageReaderReturnsTheFiveHourLimitWhenCodexProvidesIt()
+    public void UsageReaderStopsAtTheConfiguredRecentFileLimit()
     {
-        string sessionPath = Path.Combine(_testDirectory, "session-with-short-limit.jsonl");
-        File.WriteAllText(sessionPath, TokenCountLine("2026-08-20T04:00:00Z", 25));
+        string olderSession = Path.Combine(_testDirectory, "older-session.jsonl");
+        File.WriteAllText(olderSession, TokenCountLine("2026-08-20T03:00:00Z", 25));
+        File.SetLastWriteTimeUtc(olderSession, DateTime.UtcNow.AddHours(-1));
 
-        UsageSnapshot? snapshot = UsageReader.GetLatestSnapshot(_testDirectory);
+        for (int index = 0; index < 6; index++)
+        {
+            string recentSession = Path.Combine(_testDirectory, $"recent-{index}.jsonl");
+            File.WriteAllText(recentSession, "{\"payload\":{\"type\":\"other\"}}\n");
+            File.SetLastWriteTimeUtc(recentSession, DateTime.UtcNow.AddSeconds(-index));
+        }
 
-        Assert.NotNull(snapshot);
-        Assert.NotNull(snapshot.Short);
-        Assert.Equal(15, snapshot.Short.UsedPercent);
-        Assert.Equal(300, snapshot.Short.WindowMinutes);
-        Assert.Equal(1_787_200_000, snapshot.Short.ResetsAt);
+        UsageSnapshot? bounded = UsageReader.GetLatestSnapshot(_testDirectory, maxFilesToInspect: 4);
+        UsageSnapshot? expanded = UsageReader.GetLatestSnapshot(_testDirectory, maxFilesToInspect: 8);
+
+        Assert.Null(bounded);
+        Assert.NotNull(expanded);
+        Assert.Equal(25, expanded.Long.UsedPercent);
+    }
+
+    [Fact]
+    public void UsageReaderDoesNotReuseAPerFileSnapshotCache()
+    {
+        string sessionPath = Path.Combine(_testDirectory, "session.jsonl");
+        File.WriteAllText(sessionPath, TokenCountLine("2026-08-20T03:00:00Z", 40));
+        DateTime originalWriteTime = File.GetLastWriteTimeUtc(sessionPath);
+
+        UsageSnapshot? first = UsageReader.GetLatestSnapshot(_testDirectory);
+
+        File.WriteAllText(sessionPath, TokenCountLine("2026-08-20T04:00:00Z", 10));
+        File.SetLastWriteTimeUtc(sessionPath, originalWriteTime);
+        UsageSnapshot? second = UsageReader.GetLatestSnapshot(_testDirectory);
+
+        Assert.NotNull(first);
+        Assert.NotNull(second);
+        Assert.Equal(40, first.Long.UsedPercent);
+        Assert.Equal(10, second.Long.UsedPercent);
     }
 
     private static string TokenCountLine(string timestamp, int usedPercent, bool includeShortLimit = true)
@@ -242,11 +345,27 @@ public sealed class CodexConfigServiceTests : IDisposable
             $"{{\"timestamp\":\"{timestamp}\",\"payload\":{{\"type\":\"token_count\",\"rate_limits\":{{\"primary\":{{\"used_percent\":{usedPercent},\"window_minutes\":10080,\"resets_at\":1787200000}}{secondary}}}}}}}{Environment.NewLine}";
     }
 
-    private static int ReadCatalogNumber(string catalogPath, string key)
+    private static int ReadCatalogNumber(string catalogPath, string slug, string key)
     {
         JsonNode root = JsonNode.Parse(File.ReadAllText(catalogPath))!;
-        return root["models"]![0]![key]!.GetValue<int>();
+        JsonObject model = root["models"]!
+            .AsArray()
+            .OfType<JsonObject>()
+            .Single(item => item["slug"]!.GetValue<string>() == slug);
+        return model[key]!.GetValue<int>();
     }
+
+    private static string ModelCatalogJson(int contextWindow, int maxContextWindow) => $$"""
+        {
+          "models": [
+            {
+              "slug": "gpt-5.6-sol",
+              "context_window": {{contextWindow}},
+              "max_context_window": {{maxContextWindow}}
+            }
+          ]
+        }
+        """;
 
     public void Dispose()
     {

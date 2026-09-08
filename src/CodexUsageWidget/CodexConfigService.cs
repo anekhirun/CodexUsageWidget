@@ -31,9 +31,14 @@ internal sealed record ContextConfigState(
 
 internal static partial class CodexConfigService
 {
-    private const string TargetModel = "gpt-5.6-sol";
     private const string BackupSuffix = ".codex-usage-widget.bak";
-    private const int CatalogMaximumContextWindow = 1_000_000;
+    private const int Gpt56MaximumContextWindow = 1_050_000;
+    private static readonly HashSet<string> Gpt56Models =
+    [
+        "gpt-5.6-sol",
+        "gpt-5.6-terra",
+        "gpt-5.6-luna"
+    ];
 
     internal static readonly IReadOnlyList<ContextMode> Modes =
     [
@@ -105,8 +110,8 @@ internal static partial class CodexConfigService
             string? updatedCatalog = null;
 
             catalogPath = ResolveCatalogPath(content, directory);
-            if (catalogPath is not null)
-                (originalCatalog, updatedCatalog) = PrepareCatalogUpdate(catalogPath);
+            if (catalogPath is not null && !mode.IsDefault)
+                (originalCatalog, updatedCatalog) = PrepareCatalogBootstrap(catalogPath);
 
             bool configChanged = !string.Equals(content, updated, StringComparison.Ordinal);
             bool catalogChanged = updatedCatalog is not null &&
@@ -136,8 +141,8 @@ internal static partial class CodexConfigService
                 temporaryPath = null;
             }
             string successMessage = catalogChanged
-                ? $"{mode.Name} applied. Restart Codex once to load the expanded model limit; later changes apply live to new tasks."
-                : $"{mode.Name} applied. Start a new Codex task; no restart is required.";
+                ? $"{mode.Name} applied. Restart Codex once to load the GPT-5.6 catalog ceiling; later changes apply to new tasks without restarting. Project .codex/config.toml overrides still take priority."
+                : $"{mode.Name} applied. Start a new Codex task; no restart is required. Project .codex/config.toml overrides still take priority.";
             return new ConfigWriteResult(true, configPath, successMessage);
         }
         catch (JsonException exception)
@@ -186,7 +191,7 @@ internal static partial class CodexConfigService
                 : Path.Combine(configDirectory, configuredPath));
     }
 
-    private static (string Original, string Updated) PrepareCatalogUpdate(string catalogPath)
+    private static (string Original, string Updated) PrepareCatalogBootstrap(string catalogPath)
     {
         if (!File.Exists(catalogPath))
             throw new IOException($"Custom model catalog not found: {catalogPath}");
@@ -194,27 +199,49 @@ internal static partial class CodexConfigService
         string original = File.ReadAllText(catalogPath);
         JsonNode currentRoot = JsonNode.Parse(original)
             ?? throw new JsonException("The custom model catalog is empty.");
-        JsonObject? currentModel = FindModel(currentRoot, TargetModel);
-        if (currentModel is null)
-            throw new JsonException($"The custom model catalog does not contain {TargetModel}.");
+        Dictionary<string, JsonObject> currentModels = FindGpt56Models(currentRoot);
+        if (currentModels.Count == 0) return (original, original);
 
-        // The app-server caches the model catalog for its lifetime, while it reloads
-        // config.toml for new threads. Keep the catalog ceiling stable at the largest
-        // supported widget mode so switching modes only needs a new Codex task.
-        // Default still uses the model's original context_window because it removes
-        // the TOML override; raising this ceiling does not activate a larger context.
-        currentModel["max_context_window"] = CatalogMaximumContextWindow;
+        bool changed = false;
+        foreach (JsonObject currentModel in currentModels.Values)
+        {
+            // A backup is a recovery artifact, not proof that the current catalog
+            // was written by an old widget. Preserve intentional context_window edits.
+            if (!JsonNumberEquals(currentModel["max_context_window"], Gpt56MaximumContextWindow))
+            {
+                currentModel["max_context_window"] = Gpt56MaximumContextWindow;
+                changed = true;
+            }
+        }
 
-        return (original, SerializeCatalog(currentRoot));
+        return changed ? (original, SerializeCatalog(currentRoot)) : (original, original);
     }
 
-    private static JsonObject? FindModel(JsonNode root, string slug)
+    private static Dictionary<string, JsonObject> FindGpt56Models(JsonNode root)
     {
         JsonArray? models = root is JsonArray array ? array : root["models"] as JsonArray;
-        return models?
-            .OfType<JsonObject>()
-            .FirstOrDefault(model => string.Equals((string?)model["slug"], slug, StringComparison.Ordinal));
+        if (models is null) return [];
+
+        var result = new Dictionary<string, JsonObject>(StringComparer.Ordinal);
+        foreach (JsonObject model in models.OfType<JsonObject>())
+        {
+            if (model["slug"] is not JsonValue slugNode ||
+                !slugNode.TryGetValue(out string? slug) ||
+                slug is null ||
+                !Gpt56Models.Contains(slug))
+            {
+                continue;
+            }
+
+            if (!result.TryAdd(slug, model))
+                throw new JsonException($"The custom model catalog contains duplicate {slug} entries.");
+        }
+
+        return result;
     }
+
+    private static bool JsonNumberEquals(JsonNode? node, int expected) =>
+        node is not null && int.TryParse(node.ToJsonString(), out int value) && value == expected;
 
     private static string SerializeCatalog(JsonNode root) =>
         root.ToJsonString(new JsonSerializerOptions { WriteIndented = true }) + Environment.NewLine;
